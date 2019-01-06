@@ -3,25 +3,22 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/gin-gonic/gin"
-	"github.com/olivere/elastic"
-	"github.com/teris-io/shortid"
 	"log"
 	"net/http"
 	"strconv"
 	"time"
-)
 
-var (
-	elasticClient *elastic.Client
+	"github.com/gin-gonic/gin"
+	"github.com/olivere/elastic"
+	"github.com/teris-io/shortid"
 )
 
 const (
-	elasticIndexName = "books"
-	elasticTypeName  = "book"
+	elasticIndexName = "documents"
+	elasticTypeName  = "document"
 )
 
-type Book struct {
+type Document struct {
 	ID          string    `json:"id"`
 	ISBN        string    `json:"isbn"`
 	Title       string    `json:"title"`
@@ -35,7 +32,7 @@ type Book struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
-type BookRequest struct {
+type DocumentRequest struct {
 	ISBN        string    `json:"isbn"`
 	Title       string    `json:"title"`
 	SubTitle    string    `json:"subtitle"`
@@ -47,7 +44,7 @@ type BookRequest struct {
 	Website     string    `json:"website"`
 }
 
-type BookResponse struct {
+type DocumentResponse struct {
 	ISBN        string    `json:"isbn"`
 	Title       string    `json:"title"`
 	SubTitle    string    `json:"subtitle"`
@@ -61,29 +58,45 @@ type BookResponse struct {
 }
 
 type SearchResponse struct {
-	Time  string         `json:"time"`
-	Hits  string         `json:"hits"`
-	Books []BookResponse `json:"books"`
+	Time      string             `json:"time"`
+	Hits      string             `json:"hits"`
+	Documents []DocumentResponse `json:"documents"`
 }
+
+var (
+	elasticClient *elastic.Client
+)
 
 func main() {
 	var err error
 	// Create Elastic client and wait for Elasticsearch to be ready
+	for {
+		elasticClient, err = elastic.NewClient(
+			elastic.SetURL("http://elasticsearch:9200"),
+			elastic.SetSniff(false),
+		)
+		if err != nil {
+			log.Println(err)
+			// Retry every 3 seconds
+			time.Sleep(3 * time.Second)
+		} else {
+			break
+		}
+	}
 	// Start HTTP server
 	r := gin.Default()
-	r.POST("/documents", createBooksEndpoint)
+	r.POST("/documents", createDocumentsEndpoint)
 	r.GET("/documents", searchEndpoint)
 	if err = r.Run(":8080"); err != nil {
 		log.Fatal(err)
 	}
-
 }
 
-func createBooksEndpoint(context *gin.Context) {
+func createDocumentsEndpoint(c *gin.Context) {
 	// Parse request
-	var books []BookRequest
-	if err := context.BindJSON(&books); err != nil {
-		errorResponse(context, http.StatusBadRequest, "Malformed request body")
+	var docs []DocumentRequest
+	if err := c.BindJSON(&docs); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Malformed request body")
 		return
 	}
 	// Insert documents in bulk
@@ -91,56 +104,56 @@ func createBooksEndpoint(context *gin.Context) {
 		Bulk().
 		Index(elasticIndexName).
 		Type(elasticTypeName)
-	for _, b := range books {
-		book := Book{
+	for _, d := range docs {
+		doc := Document{
 			ID:          shortid.MustGenerate(),
-			ISBN:        b.ISBN,
-			Title:       b.Title,
-			SubTitle:    b.SubTitle,
-			Author:      b.Author,
-			Published:   b.Published,
-			Publisher:   b.Publisher,
-			Pages:       b.Pages,
-			Description: b.Description,
+			ISBN:        d.ISBN,
+			Title:       d.Title,
+			SubTitle:    d.SubTitle,
+			Author:      d.Author,
+			Published:   d.Published,
+			Publisher:   d.Publisher,
+			Pages:       d.Pages,
+			Description: d.Description,
 			CreatedAt:   time.Now().UTC(),
 		}
-		bulk.Add(elastic.NewBulkIndexRequest().Id(book.ID).Doc(book))
+		bulk.Add(elastic.NewBulkIndexRequest().Id(doc.ID).Doc(doc))
 	}
-	if _, err := bulk.Do(context.Request.Context()); err != nil {
+	if _, err := bulk.Do(c.Request.Context()); err != nil {
 		log.Println(err)
-		errorResponse(context, http.StatusInternalServerError, "Failed to create documents")
+		errorResponse(c, http.StatusInternalServerError, "Failed to create documents")
 		return
 	}
-	context.Status(http.StatusOK)
+	c.Status(http.StatusOK)
 }
 
-func searchEndpoint(context *gin.Context) {
-	query := context.Query("searchTerm")
+func searchEndpoint(c *gin.Context) {
+	// Parse request
+	query := c.Query("query")
 	if query == "" {
-		errorResponse(context, http.StatusBadRequest, "Query not specified")
+		errorResponse(c, http.StatusBadRequest, "Query not specified")
 		return
 	}
-
 	skip := 0
 	take := 10
-	if i, err := strconv.Atoi(context.Query("skip")); err == nil {
+	if i, err := strconv.Atoi(c.Query("skip")); err == nil {
 		skip = i
 	}
-	if i, err := strconv.Atoi(context.Query("take")); err == nil {
+	if i, err := strconv.Atoi(c.Query("take")); err == nil {
 		take = i
 	}
 	// Perform search
-	esQuery := elastic.NewMultiMatchQuery(query, "title", "description").
+	esQuery := elastic.NewMultiMatchQuery(query, "title", "content", "author").
 		Fuzziness("2").
 		MinimumShouldMatch("2")
 	result, err := elasticClient.Search().
 		Index(elasticIndexName).
 		Query(esQuery).
 		From(skip).Size(take).
-		Do(context.Request.Context())
+		Do(c.Request.Context())
 	if err != nil {
 		log.Println(err)
-		errorResponse(context, http.StatusInternalServerError, "Something went wrong")
+		errorResponse(c, http.StatusInternalServerError, "Something went wrong")
 		return
 	}
 	res := SearchResponse{
@@ -148,14 +161,14 @@ func searchEndpoint(context *gin.Context) {
 		Hits: fmt.Sprintf("%d", result.Hits.TotalHits),
 	}
 	// Transform search results before returning them
-	books := make([]BookResponse, 0)
+	docs := make([]DocumentResponse, 0)
 	for _, hit := range result.Hits.Hits {
-		var book BookResponse
-		json.Unmarshal(*hit.Source, &book)
-		books = append(books, book)
+		var doc DocumentResponse
+		json.Unmarshal(*hit.Source, &doc)
+		docs = append(docs, doc)
 	}
-	res.Books = books
-	context.JSON(http.StatusOK, res)
+	res.Documents = docs
+	c.JSON(http.StatusOK, res)
 }
 
 func errorResponse(c *gin.Context, code int, err string) {

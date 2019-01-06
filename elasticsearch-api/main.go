@@ -63,13 +63,11 @@ type SearchResponse struct {
 	Documents []DocumentResponse `json:"documents"`
 }
 
-var (
-	elasticClient *elastic.Client
-)
+var elasticClient *elastic.Client
 
 func main() {
 	var err error
-	// Create Elastic client and wait for Elasticsearch to be ready
+	// Create Elastic client and wait for to be ready
 	for {
 		elasticClient, err = elastic.NewClient(
 			elastic.SetURL("http://elasticsearch:9200"),
@@ -77,8 +75,8 @@ func main() {
 		)
 		if err != nil {
 			log.Println(err)
-			// Retry every 3 seconds
-			time.Sleep(3 * time.Second)
+			// try until elastic search client is ready
+			time.Sleep(5 * time.Second)
 		} else {
 			break
 		}
@@ -128,8 +126,8 @@ func createDocumentsEndpoint(c *gin.Context) {
 }
 
 func searchEndpoint(c *gin.Context) {
-	// Parse request
-	query := c.Query("query")
+	// get search term
+	query := c.Query("search")
 	if query == "" {
 		errorResponse(c, http.StatusBadRequest, "Query not specified")
 		return
@@ -142,9 +140,9 @@ func searchEndpoint(c *gin.Context) {
 	if i, err := strconv.Atoi(c.Query("take")); err == nil {
 		take = i
 	}
-	// Perform search
-	esQuery := elastic.NewMultiMatchQuery(query, "title", "content", "author").
-		Fuzziness("2").
+
+	esQuery := elastic.
+		NewMultiMatchQuery(query, "title", "description", "author").
 		MinimumShouldMatch("2")
 	result, err := elasticClient.Search().
 		Index(elasticIndexName).
@@ -160,7 +158,7 @@ func searchEndpoint(c *gin.Context) {
 		Time: fmt.Sprintf("%d", result.TookInMillis),
 		Hits: fmt.Sprintf("%d", result.Hits.TotalHits),
 	}
-	// Transform search results before returning them
+	// Map to response data
 	docs := make([]DocumentResponse, 0)
 	for _, hit := range result.Hits.Hits {
 		var doc DocumentResponse
